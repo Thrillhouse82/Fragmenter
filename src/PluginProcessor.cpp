@@ -22,6 +22,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout AudioFragmenterAudioProcesso
             .withLabel("%")
             .withCategory(juce::AudioProcessorParameter::genericParameter)
             .withStringFromValueFunction([](float v, int) { return juce::String(juce::roundToInt(v * 100.0f)) + "%"; })));
+    p.push_back(std::make_unique<juce::AudioParameterInt>("recentSlices", "Recent Slices N", 1, 8, 4));
     return { p.begin(), p.end() };
 }
 
@@ -29,11 +30,17 @@ void AudioFragmenterAudioProcessor::prepareToPlay(double sr, int block)
 {
     currentSampleRate = sr; maxBlockSize = juce::jmax(1, block);
     const int maxSamples = juce::jmax(1, juce::roundToInt(maxLength * float(sr) / 1000.0f));
-    ringCapacity = 2 * maxSamples + maxBlockSize;
+    ringCapacity = (maxRecentSlices + 1) * maxSamples + maxBlockSize;
     ring.setSize(2, ringCapacity, false, true, true);
     ring.clear();
     activeFragmentSamples = juce::jmax(1, juce::roundToInt(parameters.getRawParameterValue("fragmentLengthMs")->load() * float(sr) / 1000.0f));
-    sampleCursor = fragmentStart = recentStart = 0; recentLength = recentRead = 0; hasRecent = false;
+    sampleCursor = fragmentStart = 0;
+    recentRead = historyCount = historyWrite = 0;
+    previousSelection = -1;
+    latchedRecentSlices = juce::jlimit(1, maxRecentSlices,
+        juce::roundToInt(parameters.getRawParameterValue("recentSlices")->load()));
+    randomState = 0x13579bdfu;
+    for (auto& entry : history) entry = {};
 }
 
 void AudioFragmenterAudioProcessor::releaseResources() {}
@@ -53,19 +60,43 @@ void AudioFragmenterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
     {
         if (sampleCursor > fragmentStart && sampleCursor - fragmentStart >= activeFragmentSamples)
         {
-            recentStart = fragmentStart; recentLength = activeFragmentSamples; recentRead = 0; hasRecent = true;
+            history[historyWrite] = { fragmentStart, activeFragmentSamples };
+            historyWrite = (historyWrite + 1) % maxRecentSlices;
+            historyCount = juce::jmin(maxRecentSlices, historyCount + 1);
             fragmentStart = sampleCursor;
             const float requested = parameters.getRawParameterValue("fragmentLengthMs")->load();
             activeFragmentSamples = juce::jlimit(1, ringCapacity - maxBlockSize,
                 juce::roundToInt(requested * float(currentSampleRate) / 1000.0f));
+            latchedRecentSlices = juce::jlimit(1, maxRecentSlices,
+                juce::roundToInt(parameters.getRawParameterValue("recentSlices")->load()));
+
+            const int candidateCount = juce::jmin(historyCount, latchedRecentSlices);
+            int selected = -1;
+            if (candidateCount == 1)
+                selected = (historyWrite - 1 + maxRecentSlices) % maxRecentSlices;
+            else if (candidateCount > 1)
+            {
+                int available = candidateCount;
+                for (int offset = 0; offset < candidateCount; ++offset)
+                    if ((historyWrite - 1 - offset + maxRecentSlices * 2) % maxRecentSlices == previousSelection)
+                        --available;
+                int choice = int(nextRandom() % uint32_t(juce::jmax(1, available)));
+                for (int offset = 0; offset < candidateCount; ++offset)
+                {
+                    const int index = (historyWrite - 1 - offset + maxRecentSlices * 2) % maxRecentSlices;
+                    if (index == previousSelection && available < candidateCount) continue;
+                    if (choice-- == 0) { selected = index; break; }
+                }
+            }
+            if (selected >= 0) { previousSelection = selected; recentRead = 0; }
         }
         const float inL = buffer.getSample(0, i), inR = buffer.getNumChannels() > 1 ? buffer.getSample(1, i) : inL;
         ring.setSample(0, int(sampleCursor % ringCapacity), inL);
         ring.setSample(1, int(sampleCursor % ringCapacity), inR);
         float fragL = 0.0f, fragR = 0.0f;
-        if (hasRecent && recentRead < recentLength)
+        if (previousSelection >= 0 && recentRead < history[previousSelection].length)
         {
-            const int pos = int((recentStart + recentRead++) % ringCapacity);
+            const int pos = int((history[previousSelection].start + recentRead++) % ringCapacity);
             fragL = ring.getSample(0, pos); fragR = ring.getSample(1, pos);
         }
         buffer.setSample(0, i, dry * inL + wet * fragL);
@@ -81,7 +112,21 @@ void AudioFragmenterAudioProcessor::getStateInformation(juce::MemoryBlock& dest)
 
 void AudioFragmenterAudioProcessor::setStateInformation(const void* data, int size)
 {
-    if (auto xml = getXmlFromBinary(data, size)) if (xml->hasTagName(parameters.state.getType())) parameters.replaceState(juce::ValueTree::fromXml(*xml));
+    if (auto xml = getXmlFromBinary(data, size))
+        if (xml->hasTagName(parameters.state.getType()))
+        {
+            auto state = juce::ValueTree::fromXml(*xml);
+            if (!state.hasProperty("recentSlices")) state.setProperty("recentSlices", 4, nullptr);
+            parameters.replaceState(state);
+        }
+}
+
+uint32_t AudioFragmenterAudioProcessor::nextRandom() noexcept
+{
+    randomState ^= randomState << 13;
+    randomState ^= randomState >> 17;
+    randomState ^= randomState << 5;
+    return randomState;
 }
 
 juce::AudioProcessorEditor* AudioFragmenterAudioProcessor::createEditor() { return new AudioFragmenterAudioProcessorEditor(*this); }

@@ -10,6 +10,8 @@ public:
         AudioFragmenterAudioProcessor p;
         expect(p.parameters.getRawParameterValue("fragmentLengthMs")->load() == 222.0f);
         expectWithinAbsoluteError(p.parameters.getRawParameterValue("dryWet")->load(), 1.0f, 0.001f);
+        expectEquals(int(p.parameters.getRawParameterValue("recentSlices")->load()), 4);
+        expectEquals(p.parameters.getParameter("recentSlices")->getNumSteps(), 7);
         expect(p.parameters.getParameter("fragmentLengthMs")->getNumSteps() > 0);
 
         beginTest("State round trip");
@@ -19,6 +21,16 @@ public:
         AudioFragmenterAudioProcessor restored; restored.setStateInformation(state.getData(), int(state.getSize()));
         expectWithinAbsoluteError(restored.parameters.getRawParameterValue("fragmentLengthMs")->load(), 515.0f, 1.0f);
         expectWithinAbsoluteError(restored.parameters.getRawParameterValue("dryWet")->load(), 0.37f, 0.01f);
+
+        beginTest("Recent slices state round trip and old state fallback");
+        p.parameters.getParameter("recentSlices")->setValueNotifyingHost(0.75f);
+        juce::MemoryBlock recentState; p.getStateInformation(recentState);
+        AudioFragmenterAudioProcessor recentRestored; recentRestored.setStateInformation(recentState.getData(), int(recentState.getSize()));
+        expectEquals(int(recentRestored.parameters.getRawParameterValue("recentSlices")->load()), 6);
+        auto oldTree = p.parameters.copyState(); oldTree.removeProperty("recentSlices", nullptr);
+        AudioFragmenterAudioProcessor oldRestored;
+        oldRestored.parameters.replaceState(oldTree);
+        expectEquals(int(oldRestored.parameters.getRawParameterValue("recentSlices")->load()), 4);
 
         beginTest("Dry/wet endpoints");
         p.prepareToPlay(1000.0, 3);

@@ -9,7 +9,7 @@ public:
     void resized() override;
 private:
     AudioFragmenterAudioProcessor& processor;
-    juce::Slider length, wet;
-    juce::Label lengthLabel, wetLabel;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lengthAttachment, wetAttachment;
+    juce::Slider length, wet, recent;
+    juce::Label lengthLabel, wetLabel, recentLabel;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lengthAttachment, wetAttachment, recentAttachment;
 };
