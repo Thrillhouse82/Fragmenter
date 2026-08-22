@@ -47,6 +47,62 @@ public:
         expectEquals(p.getActiveFragmentSamples(), 20);
         juce::AudioBuffer<float> block2(2, 20); block2.clear(); p.processBlock(block2, midi);
         expectEquals(p.getActiveFragmentSamples(), 2000);
+
+        beginTest("Wet fragment has bounded half-cosine fades");
+        AudioFragmenterAudioProcessor faded;
+        faded.prepareToPlay(1000.0, 20);
+        faded.parameters.getParameter("fragmentLengthMs")->setValueNotifyingHost(0.0f);
+        faded.parameters.getParameter("dryWet")->setValueNotifyingHost(1.0f);
+        juce::AudioBuffer<float> source(2, 20);
+        source.clear(); for (int i = 0; i < source.getNumSamples(); ++i) { source.setSample(0, i, 1.0f); source.setSample(1, i, 1.0f); }
+        faded.processBlock(source, midi);
+        juce::AudioBuffer<float> playback(2, 20);
+        playback.clear(); for (int i = 0; i < playback.getNumSamples(); ++i) { playback.setSample(0, i, 2.0f); playback.setSample(1, i, 2.0f); }
+        faded.processBlock(playback, midi);
+        expectWithinAbsoluteError(playback.getSample(0, 0), 0.0f, 0.001f);
+        expectWithinAbsoluteError(playback.getSample(0, 1), 1.0f, 0.001f);
+        expectWithinAbsoluteError(playback.getSample(0, 18), 1.0f, 0.001f);
+        expectWithinAbsoluteError(playback.getSample(0, 19), 0.0f, 0.001f);
+
+        beginTest("Short selected fragment fades out before the next boundary");
+        AudioFragmenterAudioProcessor shortPlayback;
+        shortPlayback.prepareToPlay(1000.0, 2000);
+        shortPlayback.parameters.getParameter("fragmentLengthMs")->setValueNotifyingHost(0.0f);
+        shortPlayback.parameters.getParameter("dryWet")->setValueNotifyingHost(1.0f);
+        juce::AudioBuffer<float> shortSource(2, 20); shortSource.clear(); for (int i = 0; i < shortSource.getNumSamples(); ++i) { shortSource.setSample(0, i, 1.0f); shortSource.setSample(1, i, 1.0f); }
+        shortPlayback.processBlock(shortSource, midi);
+        shortPlayback.parameters.getParameter("fragmentLengthMs")->setValueNotifyingHost(1.0f);
+        juce::AudioBuffer<float> longPlayback(2, 2000); longPlayback.clear(); for (int i = 0; i < longPlayback.getNumSamples(); ++i) { longPlayback.setSample(0, i, 2.0f); longPlayback.setSample(1, i, 2.0f); }
+        shortPlayback.processBlock(longPlayback, midi);
+        expectWithinAbsoluteError(longPlayback.getSample(0, 0), 0.0f, 0.001f);
+        expectWithinAbsoluteError(longPlayback.getSample(0, 1), 1.0f, 0.001f);
+        expectWithinAbsoluteError(longPlayback.getSample(0, 19), 0.0f, 0.001f);
+        expectWithinAbsoluteError(longPlayback.getSample(0, 20), 0.0f, 0.001f);
+
+        beginTest("Envelope processing is independent of host block size");
+        auto render = [](int blockSize)
+        {
+            AudioFragmenterAudioProcessor processor;
+            processor.prepareToPlay(1000.0, blockSize);
+            processor.parameters.getParameter("fragmentLengthMs")->setValueNotifyingHost(0.0f);
+            processor.parameters.getParameter("dryWet")->setValueNotifyingHost(1.0f);
+            std::vector<float> output(80, 0.0f);
+            juce::MidiBuffer midiBuffer;
+            for (int offset = 0; offset < int(output.size()); offset += blockSize)
+            {
+                const int count = juce::jmin(blockSize, int(output.size()) - offset);
+                juce::AudioBuffer<float> block(2, count); block.clear();
+                const float value = float(1 + (offset / 20));
+                for (int i = 0; i < count; ++i) { block.setSample(0, i, value); block.setSample(1, i, value); }
+                processor.processBlock(block, midiBuffer);
+                for (int i = 0; i < count; ++i) output[size_t(offset + i)] = block.getSample(0, i);
+            }
+            return output;
+        };
+        const auto blockOne = render(1), blockSeven = render(7);
+        expectEquals(int(blockOne.size()), int(blockSeven.size()));
+        for (size_t i = 0; i < blockOne.size(); ++i)
+            expectWithinAbsoluteError(blockOne[i], blockSeven[i], 0.0001f);
     }
 };
 static AudioFragmenterTests tests;

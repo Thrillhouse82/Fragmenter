@@ -34,6 +34,7 @@ private:
     static constexpr int maxRecentSlices = 8;
     struct FragmentInfo { int64_t start = 0; int length = 0; };
     uint32_t nextRandom() noexcept;
+    float getWetEnvelopeGain(int position, int length) const noexcept;
 
     double currentSampleRate = 44100.0;
     int maxBlockSize = 0, activeFragmentSamples = 1;
@@ -41,6 +42,7 @@ private:
     int64_t sampleCursor = 0, fragmentStart = 0;
     int recentRead = 0, historyCount = 0, historyWrite = 0;
     int previousSelection = -1;
+    int64_t previousSelectionStart = -1;
     FragmentInfo history[maxRecentSlices];
     uint32_t randomState = 0;
     juce::AudioBuffer<float> ring;

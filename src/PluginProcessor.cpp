@@ -37,6 +37,7 @@ void AudioFragmenterAudioProcessor::prepareToPlay(double sr, int block)
     sampleCursor = fragmentStart = 0;
     recentRead = historyCount = historyWrite = 0;
     previousSelection = -1;
+    previousSelectionStart = -1;
     latchedRecentSlices = juce::jlimit(1, maxRecentSlices,
         juce::roundToInt(parameters.getRawParameterValue("recentSlices")->load()));
     randomState = 0x13579bdfu;
@@ -78,17 +79,25 @@ void AudioFragmenterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
             {
                 int available = candidateCount;
                 for (int offset = 0; offset < candidateCount; ++offset)
-                    if ((historyWrite - 1 - offset + maxRecentSlices * 2) % maxRecentSlices == previousSelection)
+                {
+                    const int index = (historyWrite - 1 - offset + maxRecentSlices * 2) % maxRecentSlices;
+                    if (previousSelectionStart >= 0 && history[index].start == previousSelectionStart)
                         --available;
+                }
                 int choice = int(nextRandom() % uint32_t(juce::jmax(1, available)));
                 for (int offset = 0; offset < candidateCount; ++offset)
                 {
                     const int index = (historyWrite - 1 - offset + maxRecentSlices * 2) % maxRecentSlices;
-                    if (index == previousSelection && available < candidateCount) continue;
+                    if (previousSelectionStart >= 0 && history[index].start == previousSelectionStart) continue;
                     if (choice-- == 0) { selected = index; break; }
                 }
             }
-            if (selected >= 0) { previousSelection = selected; recentRead = 0; }
+            if (selected >= 0)
+            {
+                previousSelection = selected;
+                previousSelectionStart = history[selected].start;
+                recentRead = 0;
+            }
         }
         const float inL = buffer.getSample(0, i), inR = buffer.getNumChannels() > 1 ? buffer.getSample(1, i) : inL;
         ring.setSample(0, int(sampleCursor % ringCapacity), inL);
@@ -96,8 +105,10 @@ void AudioFragmenterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
         float fragL = 0.0f, fragR = 0.0f;
         if (previousSelection >= 0 && recentRead < history[previousSelection].length)
         {
-            const int pos = int((history[previousSelection].start + recentRead++) % ringCapacity);
-            fragL = ring.getSample(0, pos); fragR = ring.getSample(1, pos);
+            const int position = recentRead++;
+            const int pos = int((history[previousSelection].start + position) % ringCapacity);
+            const float envelope = getWetEnvelopeGain(position, history[previousSelection].length);
+            fragL = envelope * ring.getSample(0, pos); fragR = envelope * ring.getSample(1, pos);
         }
         buffer.setSample(0, i, dry * inL + wet * fragL);
         if (buffer.getNumChannels() > 1) buffer.setSample(1, i, dry * inR + wet * fragR);
@@ -127,6 +138,29 @@ uint32_t AudioFragmenterAudioProcessor::nextRandom() noexcept
     randomState ^= randomState >> 17;
     randomState ^= randomState << 5;
     return randomState;
+}
+
+float AudioFragmenterAudioProcessor::getWetEnvelopeGain(int position, int length) const noexcept
+{
+    const int nominalFadeSamples = juce::jmax(0, juce::roundToInt(0.005 * currentSampleRate));
+    const int fadeSamples = juce::jmin(nominalFadeSamples, length / 8);
+    if (fadeSamples <= 1 || length <= 1)
+        return 1.0f;
+
+    const auto pi = juce::MathConstants<float>::pi;
+    if (position < fadeSamples)
+    {
+        const float x = float(position) / float(fadeSamples - 1);
+        return 0.5f - 0.5f * std::cos(pi * x);
+    }
+
+    if (position >= length - fadeSamples)
+    {
+        const float x = float(position - (length - fadeSamples)) / float(fadeSamples - 1);
+        return 0.5f + 0.5f * std::cos(pi * x);
+    }
+
+    return 1.0f;
 }
 
 juce::AudioProcessorEditor* AudioFragmenterAudioProcessor::createEditor() { return new AudioFragmenterAudioProcessorEditor(*this); }
