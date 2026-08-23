@@ -23,6 +23,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout AudioFragmenterAudioProcesso
             .withCategory(juce::AudioProcessorParameter::genericParameter)
             .withStringFromValueFunction([](float v, int) { return juce::String(juce::roundToInt(v * 100.0f)) + "%"; })));
     p.push_back(std::make_unique<juce::AudioParameterInt>("recentSlices", "Recent Slices N", 1, 8, 4));
+    p.push_back(std::make_unique<juce::AudioParameterBool>("fadeEnabled", "Fade", true));
     return { p.begin(), p.end() };
 }
 
@@ -40,6 +41,7 @@ void AudioFragmenterAudioProcessor::prepareToPlay(double sr, int block)
     previousSelectionStart = -1;
     latchedRecentSlices = juce::jlimit(1, maxRecentSlices,
         juce::roundToInt(parameters.getRawParameterValue("recentSlices")->load()));
+    latchedFadeEnabled = parameters.getRawParameterValue("fadeEnabled")->load() >= 0.5f;
     randomState = 0x13579bdfu;
     for (auto& entry : history) entry = {};
 }
@@ -70,6 +72,7 @@ void AudioFragmenterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
                 juce::roundToInt(requested * float(currentSampleRate) / 1000.0f));
             latchedRecentSlices = juce::jlimit(1, maxRecentSlices,
                 juce::roundToInt(parameters.getRawParameterValue("recentSlices")->load()));
+            latchedFadeEnabled = parameters.getRawParameterValue("fadeEnabled")->load() >= 0.5f;
 
             const int candidateCount = juce::jmin(historyCount, latchedRecentSlices);
             int selected = -1;
@@ -107,7 +110,9 @@ void AudioFragmenterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
         {
             const int position = recentRead++;
             const int pos = int((history[previousSelection].start + position) % ringCapacity);
-            const float envelope = getWetEnvelopeGain(position, history[previousSelection].length);
+            const float envelope = latchedFadeEnabled
+                ? getWetEnvelopeGain(position, history[previousSelection].length)
+                : 1.0f;
             fragL = envelope * ring.getSample(0, pos); fragR = envelope * ring.getSample(1, pos);
         }
         buffer.setSample(0, i, dry * inL + wet * fragL);
@@ -128,6 +133,7 @@ void AudioFragmenterAudioProcessor::setStateInformation(const void* data, int si
         {
             auto state = juce::ValueTree::fromXml(*xml);
             if (!state.hasProperty("recentSlices")) state.setProperty("recentSlices", 4, nullptr);
+            if (!state.hasProperty("fadeEnabled")) state.setProperty("fadeEnabled", true, nullptr);
             parameters.replaceState(state);
         }
 }
@@ -142,7 +148,7 @@ uint32_t AudioFragmenterAudioProcessor::nextRandom() noexcept
 
 float AudioFragmenterAudioProcessor::getWetEnvelopeGain(int position, int length) const noexcept
 {
-    const int nominalFadeSamples = juce::jmax(0, juce::roundToInt(0.005 * currentSampleRate));
+    const int nominalFadeSamples = juce::jmax(0, juce::roundToInt(0.020 * currentSampleRate));
     const int fadeSamples = juce::jmin(nominalFadeSamples, length / 8);
     if (fadeSamples <= 1 || length <= 1)
         return 1.0f;

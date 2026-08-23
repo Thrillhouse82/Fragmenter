@@ -29,6 +29,7 @@ public:
     juce::AudioProcessorValueTreeState parameters;
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     int getActiveFragmentSamples() const noexcept { return activeFragmentSamples; }
+    bool getActiveFadeEnabled() const noexcept { return latchedFadeEnabled; }
 
 private:
     static constexpr int maxRecentSlices = 8;
@@ -39,6 +40,7 @@ private:
     double currentSampleRate = 44100.0;
     int maxBlockSize = 0, activeFragmentSamples = 1;
     int latchedRecentSlices = 4;
+    bool latchedFadeEnabled = true;
     int64_t sampleCursor = 0, fragmentStart = 0;
     int recentRead = 0, historyCount = 0, historyWrite = 0;
     int previousSelection = -1;

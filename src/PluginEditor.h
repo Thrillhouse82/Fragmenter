@@ -10,6 +10,8 @@ public:
 private:
     AudioFragmenterAudioProcessor& processor;
     juce::Slider length, wet, recent;
+    juce::ToggleButton fade;
     juce::Label lengthLabel, wetLabel, recentLabel;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lengthAttachment, wetAttachment, recentAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> fadeAttachment;
 };
