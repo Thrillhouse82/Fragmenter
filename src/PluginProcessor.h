@@ -30,17 +30,23 @@ public:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     int getActiveFragmentSamples() const noexcept { return activeFragmentSamples; }
     bool getActiveFadeEnabled() const noexcept { return latchedFadeEnabled; }
+    int getActiveLengthMode() const noexcept { return latchedLengthMode; }
+    int getActiveSyncDivision() const noexcept { return latchedSyncDivision; }
 
 private:
     static constexpr int maxRecentSlices = 8;
     struct FragmentInfo { int64_t start = 0; int length = 0; };
     uint32_t nextRandom() noexcept;
     float getWetEnvelopeGain(int position, int length) const noexcept;
+    int calculateFragmentSamples(int mode, int division, double bpm) const noexcept;
+    static float getSyncBeatFactor(int division) noexcept;
 
     double currentSampleRate = 44100.0;
     int maxBlockSize = 0, activeFragmentSamples = 1;
     int latchedRecentSlices = 4;
     bool latchedFadeEnabled = true;
+    int latchedLengthMode = 0, latchedSyncDivision = 6;
+    double lastValidBpm = 120.0, pendingBpm = 120.0, latchedBpm = 120.0;
     int64_t sampleCursor = 0, fragmentStart = 0;
     int recentRead = 0, historyCount = 0, historyWrite = 0;
     int previousSelection = -1;

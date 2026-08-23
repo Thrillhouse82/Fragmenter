@@ -1,5 +1,18 @@
 #include "../src/PluginProcessor.h"
 
+class TestPlayHead final : public juce::AudioPlayHead
+{
+public:
+    juce::Optional<PositionInfo> getPosition() const override
+    {
+        PositionInfo position;
+        if (bpm.has_value()) position.setBpm(*bpm);
+        return position;
+    }
+
+    std::optional<double> bpm;
+};
+
 class AudioFragmenterTests : public juce::UnitTest
 {
 public:
@@ -12,6 +25,8 @@ public:
         expectWithinAbsoluteError(p.parameters.getRawParameterValue("dryWet")->load(), 1.0f, 0.001f);
         expectEquals(int(p.parameters.getRawParameterValue("recentSlices")->load()), 4);
         expectWithinAbsoluteError(p.parameters.getRawParameterValue("fadeEnabled")->load(), 1.0f, 0.001f);
+        expectEquals(int(p.parameters.getRawParameterValue("sliceLengthMode")->load()), 0);
+        expectEquals(int(p.parameters.getRawParameterValue("syncDivision")->load()), 6);
         expectEquals(p.parameters.getParameter("recentSlices")->getNumSteps(), 7);
         expect(p.parameters.getParameter("fragmentLengthMs")->getNumSteps() > 0);
 
@@ -32,6 +47,25 @@ public:
         AudioFragmenterAudioProcessor oldFadeRestored;
         oldFadeRestored.parameters.replaceState(oldFadeTree);
         expectWithinAbsoluteError(oldFadeRestored.parameters.getRawParameterValue("fadeEnabled")->load(), 1.0f, 0.001f);
+
+        beginTest("Tempo parameters state round trip and legacy fallback");
+        auto* modeParameter = dynamic_cast<juce::AudioParameterChoice*>(p.parameters.getParameter("sliceLengthMode"));
+        auto* divisionParameter = dynamic_cast<juce::AudioParameterChoice*>(p.parameters.getParameter("syncDivision"));
+        expect(modeParameter != nullptr);
+        expect(divisionParameter != nullptr);
+        if (modeParameter != nullptr) *modeParameter = 1;
+        if (divisionParameter != nullptr) *divisionParameter = 7;
+        juce::MemoryBlock tempoState; p.getStateInformation(tempoState);
+        AudioFragmenterAudioProcessor tempoRestored; tempoRestored.setStateInformation(tempoState.getData(), int(tempoState.getSize()));
+        expectEquals(int(tempoRestored.parameters.getRawParameterValue("sliceLengthMode")->load()), 1);
+        expectEquals(int(tempoRestored.parameters.getRawParameterValue("syncDivision")->load()), 7);
+        auto oldTempoTree = p.parameters.copyState();
+        oldTempoTree.removeProperty("sliceLengthMode", nullptr);
+        oldTempoTree.removeProperty("syncDivision", nullptr);
+        AudioFragmenterAudioProcessor oldTempoRestored;
+        oldTempoRestored.parameters.replaceState(oldTempoTree);
+        expectEquals(int(oldTempoRestored.parameters.getRawParameterValue("sliceLengthMode")->load()), 0);
+        expectEquals(int(oldTempoRestored.parameters.getRawParameterValue("syncDivision")->load()), 6);
 
         beginTest("Recent slices state round trip and old state fallback");
         p.parameters.getParameter("recentSlices")->setValueNotifyingHost(0.75f);
@@ -123,6 +157,55 @@ public:
         juce::AudioBuffer<float> latchedNext(2, 1); latchedNext.clear();
         latched.processBlock(latchedNext, midi);
         expect(!latched.getActiveFadeEnabled());
+
+        beginTest("Tempo sync calculates quarter and eighth note lengths");
+        AudioFragmenterAudioProcessor synced;
+        synced.parameters.getParameter("sliceLengthMode")->setValueNotifyingHost(1.0f);
+        synced.parameters.getParameter("syncDivision")->setValueNotifyingHost(6.0f / 14.0f);
+        synced.parameters.getParameter("dryWet")->setValueNotifyingHost(1.0f);
+        TestPlayHead playHead;
+        playHead.bpm = 120.0;
+        synced.setPlayHead(&playHead);
+        synced.prepareToPlay(1000.0, 500);
+        expectEquals(synced.getActiveFragmentSamples(), 500);
+        juce::AudioBuffer<float> tempoSource(2, 500); tempoSource.clear();
+        synced.processBlock(tempoSource, midi);
+        synced.parameters.getParameter("syncDivision")->setValueNotifyingHost(9.0f / 14.0f);
+        juce::AudioBuffer<float> tempoNext(2, 1); tempoNext.clear();
+        synced.processBlock(tempoNext, midi);
+        expectEquals(synced.getActiveFragmentSamples(), 250);
+        synced.parameters.getParameter("sliceLengthMode")->setValueNotifyingHost(0.0f);
+        juce::AudioBuffer<float> modeRemainder(2, 250); modeRemainder.clear();
+        synced.processBlock(modeRemainder, midi);
+        expectEquals(synced.getActiveLengthMode(), 1);
+        juce::AudioBuffer<float> modeBoundary(2, 1); modeBoundary.clear();
+        synced.processBlock(modeBoundary, midi);
+        expectEquals(synced.getActiveLengthMode(), 0);
+        expectEquals(synced.getActiveFragmentSamples(), 222);
+
+        beginTest("Tempo changes and missing BPM use boundary latching and fallback");
+        AudioFragmenterAudioProcessor tempoChanged;
+        tempoChanged.parameters.getParameter("sliceLengthMode")->setValueNotifyingHost(1.0f);
+        tempoChanged.parameters.getParameter("syncDivision")->setValueNotifyingHost(6.0f / 14.0f);
+        TestPlayHead changingHead;
+        changingHead.bpm = 120.0;
+        tempoChanged.setPlayHead(&changingHead);
+        tempoChanged.prepareToPlay(1000.0, 500);
+        expectEquals(tempoChanged.getActiveFragmentSamples(), 500);
+        changingHead.bpm = 60.0;
+        juce::AudioBuffer<float> running(2, 500); running.clear();
+        tempoChanged.processBlock(running, midi);
+        expectEquals(tempoChanged.getActiveFragmentSamples(), 500);
+        juce::AudioBuffer<float> changedBoundary(2, 1); changedBoundary.clear();
+        tempoChanged.processBlock(changedBoundary, midi);
+        expectEquals(tempoChanged.getActiveFragmentSamples(), 1000);
+        AudioFragmenterAudioProcessor noTempo;
+        noTempo.parameters.getParameter("sliceLengthMode")->setValueNotifyingHost(1.0f);
+        noTempo.parameters.getParameter("syncDivision")->setValueNotifyingHost(6.0f / 14.0f);
+        TestPlayHead noTempoHead;
+        noTempo.setPlayHead(&noTempoHead);
+        noTempo.prepareToPlay(1000.0, 64);
+        expectEquals(noTempo.getActiveFragmentSamples(), 500);
 
         beginTest("Fade remains safe at multiple samplerates");
         for (const double sampleRate : { 8000.0, 44100.0, 48000.0, 96000.0 })

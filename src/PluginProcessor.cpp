@@ -1,7 +1,18 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
-namespace { constexpr float minLength = 20.0f, maxLength = 2000.0f, defaultLength = 222.0f; }
+namespace
+{
+constexpr float minLength = 20.0f, maxLength = 2000.0f, defaultLength = 222.0f;
+constexpr int defaultSyncDivision = 6;
+
+juce::StringArray getSyncDivisionLabels()
+{
+    return { "1/1", "1/1 D", "1/1 T", "1/2", "1/2 D", "1/2 T",
+             "1/4", "1/4 D", "1/4 T", "1/8", "1/8 D", "1/8 T",
+             "1/16", "1/16 D", "1/16 T" };
+}
+}
 
 AudioFragmenterAudioProcessor::AudioFragmenterAudioProcessor()
     : AudioProcessor(BusesProperties().withInput("Input", juce::AudioChannelSet::stereo(), true)
@@ -24,6 +35,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout AudioFragmenterAudioProcesso
             .withStringFromValueFunction([](float v, int) { return juce::String(juce::roundToInt(v * 100.0f)) + "%"; })));
     p.push_back(std::make_unique<juce::AudioParameterInt>("recentSlices", "Recent Slices N", 1, 8, 4));
     p.push_back(std::make_unique<juce::AudioParameterBool>("fadeEnabled", "Fade", true));
+    p.push_back(std::make_unique<juce::AudioParameterChoice>("sliceLengthMode", "Slice Length Mode",
+        juce::StringArray { "Milliseconds", "Tempo Sync" }, 0));
+    p.push_back(std::make_unique<juce::AudioParameterChoice>("syncDivision", "Tempo Division",
+        getSyncDivisionLabels(), defaultSyncDivision));
     return { p.begin(), p.end() };
 }
 
@@ -34,7 +49,12 @@ void AudioFragmenterAudioProcessor::prepareToPlay(double sr, int block)
     ringCapacity = (maxRecentSlices + 1) * maxSamples + maxBlockSize;
     ring.setSize(2, ringCapacity, false, true, true);
     ring.clear();
-    activeFragmentSamples = juce::jmax(1, juce::roundToInt(parameters.getRawParameterValue("fragmentLengthMs")->load() * float(sr) / 1000.0f));
+    latchedLengthMode = juce::jlimit(0, 1,
+        juce::roundToInt(parameters.getRawParameterValue("sliceLengthMode")->load()));
+    latchedSyncDivision = juce::jlimit(0, 14,
+        juce::roundToInt(parameters.getRawParameterValue("syncDivision")->load()));
+    lastValidBpm = pendingBpm = latchedBpm = 120.0;
+    activeFragmentSamples = calculateFragmentSamples(latchedLengthMode, latchedSyncDivision, latchedBpm);
     sampleCursor = fragmentStart = 0;
     recentRead = historyCount = historyWrite = 0;
     previousSelection = -1;
@@ -56,6 +76,13 @@ bool AudioFragmenterAudioProcessor::isBusesLayoutSupported(const BusesLayout& l)
 
 void AudioFragmenterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
+    pendingBpm = lastValidBpm;
+    if (auto* playHead = getPlayHead())
+        if (auto position = playHead->getPosition())
+            if (auto bpm = position->getBpm())
+                if (std::isfinite(*bpm) && *bpm > 0.0)
+                    pendingBpm = lastValidBpm = *bpm;
+
     const float wet = juce::jlimit(0.0f, 1.0f, parameters.getRawParameterValue("dryWet")->load());
     const float dry = 1.0f - wet;
     const int n = buffer.getNumSamples();
@@ -67,9 +94,12 @@ void AudioFragmenterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffe
             historyWrite = (historyWrite + 1) % maxRecentSlices;
             historyCount = juce::jmin(maxRecentSlices, historyCount + 1);
             fragmentStart = sampleCursor;
-            const float requested = parameters.getRawParameterValue("fragmentLengthMs")->load();
-            activeFragmentSamples = juce::jlimit(1, ringCapacity - maxBlockSize,
-                juce::roundToInt(requested * float(currentSampleRate) / 1000.0f));
+            latchedLengthMode = juce::jlimit(0, 1,
+                juce::roundToInt(parameters.getRawParameterValue("sliceLengthMode")->load()));
+            latchedSyncDivision = juce::jlimit(0, 14,
+                juce::roundToInt(parameters.getRawParameterValue("syncDivision")->load()));
+            latchedBpm = pendingBpm;
+            activeFragmentSamples = calculateFragmentSamples(latchedLengthMode, latchedSyncDivision, latchedBpm);
             latchedRecentSlices = juce::jlimit(1, maxRecentSlices,
                 juce::roundToInt(parameters.getRawParameterValue("recentSlices")->load()));
             latchedFadeEnabled = parameters.getRawParameterValue("fadeEnabled")->load() >= 0.5f;
@@ -134,8 +164,35 @@ void AudioFragmenterAudioProcessor::setStateInformation(const void* data, int si
             auto state = juce::ValueTree::fromXml(*xml);
             if (!state.hasProperty("recentSlices")) state.setProperty("recentSlices", 4, nullptr);
             if (!state.hasProperty("fadeEnabled")) state.setProperty("fadeEnabled", true, nullptr);
+            if (!state.hasProperty("sliceLengthMode")) state.setProperty("sliceLengthMode", 0, nullptr);
+            if (!state.hasProperty("syncDivision")) state.setProperty("syncDivision", defaultSyncDivision, nullptr);
             parameters.replaceState(state);
         }
+}
+
+int AudioFragmenterAudioProcessor::calculateFragmentSamples(int mode, int division, double bpm) const noexcept
+{
+    if (mode == 0)
+    {
+        const float requested = parameters.getRawParameterValue("fragmentLengthMs")->load();
+        return juce::jlimit(1, ringCapacity - maxBlockSize,
+            juce::roundToInt(requested * float(currentSampleRate) / 1000.0f));
+    }
+
+    const double safeBpm = (std::isfinite(bpm) && bpm > 0.0) ? bpm : 120.0;
+    const double seconds = (60.0 / safeBpm) * double(getSyncBeatFactor(division));
+    return juce::jlimit(1, ringCapacity - maxBlockSize,
+        juce::roundToInt(seconds * currentSampleRate));
+}
+
+float AudioFragmenterAudioProcessor::getSyncBeatFactor(int division) noexcept
+{
+    static constexpr float factors[] = { 4.0f, 6.0f, 8.0f / 3.0f,
+                                          2.0f, 3.0f, 4.0f / 3.0f,
+                                          1.0f, 1.5f, 2.0f / 3.0f,
+                                          0.5f, 0.75f, 1.0f / 3.0f,
+                                          0.25f, 0.375f, 1.0f / 6.0f };
+    return factors[juce::jlimit(0, 14, division)];
 }
 
 uint32_t AudioFragmenterAudioProcessor::nextRandom() noexcept
